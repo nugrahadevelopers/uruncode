@@ -210,7 +210,7 @@ case "${1:-}" in
     ;;
   update|--update|upgrade|--upgrade)
     say "Updating $APP_NAME to the latest version..."
-    curl -fsSL "${URUNCODE_INSTALL_URL:-https://raw.githubusercontent.com/urunai/uruncode/main/install.sh}" | bash
+    curl -fsSL "${URUNCODE_INSTALL_URL:-https://raw.githubusercontent.com/nugrahadevelopers/uruncode/main/install.sh}" | bash
     exit $?
     ;;
   help|--help|-h)
