@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 
 $AppName = 'uruncode'
 $DefaultBaseUrl = 'https://api.urunai.my.id/v1'
-$DefaultModel_CLAUDE = 'claude-haiku-4-5-20251001'
+$DefaultModel_CLAUDE = 'aim-cdx-mini'
 $DefaultModel_CODEX = 'gpt-5.4-mini'
 $ConfigDir = Join-Path $env:APPDATA 'uruncode'
 $ConfigFile = Join-Path $ConfigDir 'config'
@@ -75,7 +75,127 @@ function Restore-ConfigBackups {
   Restore-BackupFile (Join-Path $codexHome "config.toml") "codex-config.toml"
   Restore-BackupFile (Join-Path $codexHome "uruncode.config.toml") "codex-uruncode.config.toml"
   $backupDir = Join-Path $ConfigDir "backups"
-  if (Test-Path $backupDir) { Remove-Item $backupDir -Force -ErrorAction SilentlyContinue }
+  if (Test-Path $backupDir) { Remove-Item $backupDir -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function ConvertTo-OrderedMap([object]$Object) {
+  $map = [ordered]@{}
+  if ($null -eq $Object) { return ,$map }
+  if ($Object -is [System.Collections.IDictionary]) {
+    foreach ($key in $Object.Keys) { $map[$key] = $Object[$key] }
+  } else {
+    foreach ($property in $Object.PSObject.Properties) { $map[$property.Name] = $property.Value }
+  }
+  return ,$map
+}
+
+function Write-JsonFile([string]$Path, [object]$Content) {
+  $json = $Content | ConvertTo-Json -Depth 20
+  $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+  [System.IO.File]::WriteAllText($Path, $json + "`n", $utf8NoBom)
+}
+
+function Remove-ClaudeUrunAISettings {
+  $settingsFile = Join-Path $env:USERPROFILE ".claude\settings.json"
+  if (-not (Test-Path $settingsFile)) { return }
+
+  try {
+    $parsed = Get-Content -Raw -Path $settingsFile | ConvertFrom-Json
+  } catch {
+    return
+  }
+  if (-not $parsed) { return }
+
+  $content = ConvertTo-OrderedMap $parsed
+  if (-not $content.Contains('env') -or -not $content['env']) { return }
+
+  $envContent = ConvertTo-OrderedMap $content['env']
+  if (-not $envContent.Contains('ANTHROPIC_BASE_URL')) { return }
+
+  $baseUrl = [string]$envContent['ANTHROPIC_BASE_URL']
+  $apiKey = if ($envContent.Contains('ANTHROPIC_API_KEY')) { [string]$envContent['ANTHROPIC_API_KEY'] } else { '' }
+  $authToken = if ($envContent.Contains('ANTHROPIC_AUTH_TOKEN')) { [string]$envContent['ANTHROPIC_AUTH_TOKEN'] } else { '' }
+  $storedKey = Get-Key
+  $expectedBaseUrl = if ($env:URUNAI_BASE_URL) { $env:URUNAI_BASE_URL } else { $DefaultBaseUrl }
+  $matchesStoredKey = $storedKey -and (($apiKey -and ($apiKey -eq $storedKey)) -or ($authToken -and ($authToken -eq $storedKey)))
+  if (($baseUrl -ne $expectedBaseUrl) -and ($baseUrl -notlike '*urunai*') -and (-not $matchesStoredKey)) { return }
+
+  [void]$envContent.Remove('ANTHROPIC_BASE_URL')
+  if ($envContent.Contains('ANTHROPIC_MODEL')) {
+    [void]$envContent.Remove('ANTHROPIC_MODEL')
+  }
+  if ($envContent.Contains('ANTHROPIC_API_KEY')) {
+    [void]$envContent.Remove('ANTHROPIC_API_KEY')
+  }
+  if ($envContent.Contains('ANTHROPIC_AUTH_TOKEN')) {
+    [void]$envContent.Remove('ANTHROPIC_AUTH_TOKEN')
+  }
+
+  if ($envContent.Count -gt 0) {
+    $content['env'] = $envContent
+  } else {
+    [void]$content.Remove('env')
+  }
+
+  if ($content.Count -gt 0) {
+    Write-JsonFile $settingsFile $content
+  } else {
+    Remove-Item $settingsFile -Force
+  }
+  Write-Host "Removed UrunAI Claude settings from $settingsFile"
+}
+
+function Clear-UrunCodeState {
+  $backupDir = Join-Path $ConfigDir "backups"
+  $claudeBackup = Join-Path $backupDir "claude-settings.json"
+  $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+  $codexProfile = Join-Path $codexHome "uruncode.config.toml"
+  $codexProfileBackup = Join-Path $backupDir "codex-uruncode.config.toml"
+  $hadClaudeBackup = (Test-Path $claudeBackup) -or (Test-Path "$claudeBackup.missing")
+  $hadCodexProfileBackup = (Test-Path $codexProfileBackup) -or (Test-Path "$codexProfileBackup.missing")
+
+  Restore-ConfigBackups
+  if (-not $hadClaudeBackup) { Remove-ClaudeUrunAISettings }
+  if (-not $hadCodexProfileBackup -and (Test-Path $codexProfile)) { Remove-Item $codexProfile -Force }
+  if (Test-Path $ConfigFile) { Remove-Item $ConfigFile -Force }
+  Write-Host 'Stored key removed.'
+}
+
+function Remove-UrunCodeFromPath([string]$InstallDir) {
+  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+  if (-not $userPath) { return }
+
+  $parts = @()
+  foreach ($part in ($userPath -split ';')) {
+    if ($part -and ($part.TrimEnd('\') -ne $InstallDir.TrimEnd('\'))) { $parts += $part }
+  }
+  $newPath = ($parts -join ';')
+  if ($newPath -ne $userPath) {
+    [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+    $env:Path = ($env:Path -split ';' | Where-Object { $_ -and ($_.TrimEnd('\') -ne $InstallDir.TrimEnd('\')) }) -join ';'
+    Write-Host "Removed $InstallDir from your user PATH."
+  }
+}
+
+function Invoke-Uninstall {
+  Clear-UrunCodeState
+
+  $installDir = Join-Path $env:LOCALAPPDATA 'Programs\uruncode'
+  Remove-UrunCodeFromPath $installDir
+
+  $safeConfigDir = $ConfigDir -replace "'", "''"
+  $safeInstallDir = $installDir -replace "'", "''"
+  $script = @"
+`$ErrorActionPreference = 'SilentlyContinue'
+Start-Sleep -Seconds 2
+Remove-Item -Recurse -Force '$safeConfigDir'
+Remove-Item -Recurse -Force '$safeInstallDir'
+"@
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+  Start-Process -WindowStyle Hidden -FilePath powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded | Out-Null
+
+  Write-Host "Uninstall scheduled. $installDir and $ConfigDir will be removed shortly."
+  Write-Host 'Open a new terminal before reinstalling uruncode.'
 }
 
 function Invoke-Setup {
@@ -126,13 +246,15 @@ Usage:
   uruncode codex [ARGS...]  Run Codex CLI through UrunAI
   uruncode config [KEY]     Save or replace the UrunAI API key
   uruncode reset            Restore CLI config backups and delete the stored API key
+  uruncode uninstall        Remove uruncode and stored state
   uruncode update           Re-run the installer
 
 Environment overrides:
   URUNAI_API_KEY       API key to save/use
   URUNAI_BASE_URL      Gateway base URL
-  URUNAI_CLAUDE_MODEL  Claude Code model alias
-  URUNAI_CODEX_MODEL   Codex CLI model alias
+  URUNAI_CLAUDE_MODEL      Claude Code model alias
+  URUNAI_CLAUDE_AUTH_MODE  Claude auth mode: bearer (default) or api-key
+  URUNAI_CODEX_MODEL       Codex CLI model alias
 '@
 }
 
@@ -176,24 +298,42 @@ env_key = "URUNAI_API_KEY"
   Set-Content -Path $profileFile -Value $content -Encoding ASCII
 }
 
-function Ensure-ClaudeSettings([string]$BaseUrl, [string]$Key) {
+function Ensure-ClaudeSettings([string]$BaseUrl, [string]$Key, [string]$Model, [string]$AuthMode) {
   $settingsDir = Join-Path $env:USERPROFILE ".claude"
   $settingsFile = Join-Path $settingsDir "settings.json"
   Backup-FileOnce $settingsFile "claude-settings.json"
   New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
-  $env:URUNCODE_CLAUDE_BASE_URL = $BaseUrl
-  $env:URUNCODE_CLAUDE_AUTH_TOKEN = $Key
-  $env:URUNCODE_CLAUDE_SETTINGS_FILE = $settingsFile
-  node -e '
-const fs = require("fs");
-const file = process.env.URUNCODE_CLAUDE_SETTINGS_FILE;
-let content = {};
-if (fs.existsSync(file)) {
-  try { content = JSON.parse(fs.readFileSync(file, "utf8")); } catch { content = {}; }
-}
-content.env = { ...(content.env || {}), ANTHROPIC_BASE_URL: process.env.URUNCODE_CLAUDE_BASE_URL, ANTHROPIC_AUTH_TOKEN: process.env.URUNCODE_CLAUDE_AUTH_TOKEN };
-fs.writeFileSync(file, JSON.stringify(content, null, 2) + "\\n", "utf8");
-'
+
+  $content = [ordered]@{}
+  if (Test-Path $settingsFile) {
+    try {
+      $parsed = Get-Content -Raw -Path $settingsFile | ConvertFrom-Json
+      if ($parsed) { $content = ConvertTo-OrderedMap $parsed }
+    } catch {
+      $content = [ordered]@{}
+    }
+  }
+
+  $envContent = [ordered]@{}
+  if ($content.Contains('env') -and $content['env']) {
+    $envContent = ConvertTo-OrderedMap $content['env']
+  }
+  $envContent['ANTHROPIC_BASE_URL'] = $BaseUrl
+  $envContent['ANTHROPIC_MODEL'] = $Model
+  if ($AuthMode -eq 'api-key') {
+    $envContent['ANTHROPIC_API_KEY'] = $Key
+    if ($envContent.Contains('ANTHROPIC_AUTH_TOKEN')) {
+      [void]$envContent.Remove('ANTHROPIC_AUTH_TOKEN')
+    }
+  } else {
+    $envContent['ANTHROPIC_AUTH_TOKEN'] = $Key
+    if ($envContent.Contains('ANTHROPIC_API_KEY')) {
+      [void]$envContent.Remove('ANTHROPIC_API_KEY')
+    }
+  }
+  $content['env'] = $envContent
+
+  Write-JsonFile $settingsFile $content
 }
 
 function Invoke-Claude([string]$Key, [string[]]$Rest) {
@@ -204,11 +344,29 @@ function Invoke-Claude([string]$Key, [string[]]$Rest) {
   }
 
   $baseUrl = if ($env:URUNAI_BASE_URL) { $env:URUNAI_BASE_URL } else { $DefaultBaseUrl }
+  $model = if ($env:URUNAI_CLAUDE_MODEL) { $env:URUNAI_CLAUDE_MODEL } else { $DefaultModel_CLAUDE }
+  $authMode = if ($env:URUNAI_CLAUDE_AUTH_MODE) { ([string]$env:URUNAI_CLAUDE_AUTH_MODE).ToLowerInvariant() } else { 'bearer' }
 
   $env:ANTHROPIC_BASE_URL = $baseUrl
-  $env:ANTHROPIC_AUTH_TOKEN = $Key
-  Ensure-ClaudeSettings $baseUrl $Key
-  & claude @Rest
+  $env:ANTHROPIC_MODEL = $model
+  if ($authMode -eq 'api-key') {
+    $env:ANTHROPIC_API_KEY = $Key
+    Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue
+  } else {
+    $env:ANTHROPIC_AUTH_TOKEN = $Key
+    Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
+  }
+  Ensure-ClaudeSettings $baseUrl $Key $model $authMode
+
+  $hasModelArg = $false
+  foreach ($arg in $Rest) {
+    if (($arg -eq '--model') -or ($arg -like '--model=*')) { $hasModelArg = $true }
+  }
+  if ($hasModelArg) {
+    & claude @Rest
+  } else {
+    & claude --model $model @Rest
+  }
   exit $LASTEXITCODE
 }
 
@@ -242,14 +400,16 @@ if ($args.Count -ge 1) {
       exit 0
     }
     '^(reset|--reset)$' {
-      Restore-ConfigBackups
-      if (Test-Path $ConfigFile) { Remove-Item $ConfigFile -Force }
-      Write-Host 'Stored key removed.'
+      Clear-UrunCodeState
+      exit 0
+    }
+    '^(uninstall|--uninstall)$' {
+      Invoke-Uninstall
       exit 0
     }
     '^(update|--update|upgrade|--upgrade)$' {
       Write-Host "Updating $AppName to the latest version..."
-      $installUrl = if ($env:URUNCODE_INSTALL_URL) { $env:URUNCODE_INSTALL_URL } else { 'https://raw.githubusercontent.com/urunai/uruncode/main/install.ps1' }
+      $installUrl = if ($env:URUNCODE_INSTALL_URL) { $env:URUNCODE_INSTALL_URL } else { 'https://raw.githubusercontent.com/nugrahadevelopers/uruncode/main/install.ps1' }
       irm $installUrl | iex
       exit 0
     }

@@ -6,7 +6,7 @@ set -euo pipefail
 
 APP_NAME="uruncode"
 DEFAULT_BASE_URL="https://api.urunai.my.id/v1"
-DEFAULT_MODEL_CLAUDE="claude-haiku-4-5-20251001"
+DEFAULT_MODEL_CLAUDE="aim-cdx-mini"
 DEFAULT_MODEL_CODEX="gpt-5.4-mini"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/uruncode"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -154,8 +154,9 @@ Usage:
 Environment overrides:
   URUNAI_API_KEY       API key to save/use
   URUNAI_BASE_URL      Gateway base URL
-  URUNAI_CLAUDE_MODEL  Claude Code model alias
-  URUNAI_CODEX_MODEL   Codex CLI model alias
+  URUNAI_CLAUDE_MODEL      Claude Code model alias
+  URUNAI_CLAUDE_AUTH_MODE  Claude auth mode: bearer (default) or api-key
+  URUNAI_CODEX_MODEL       Codex CLI model alias
 EOF
 }
 
@@ -199,19 +200,27 @@ EOF
 }
 
 ensure_claude_settings() {
-  local base_url="$1" key="$2"
+  local base_url="$1" key="$2" model="$3" auth_mode="$4"
   local settings_dir="$HOME/.claude"
   local settings_file="$settings_dir/settings.json"
   backup_file_once "$settings_file" "claude-settings.json"
   mkdir -p "$settings_dir"
-  BASE_URL="$base_url" AUTH_TOKEN="$key" SETTINGS_FILE="$settings_file" node -e '
+  BASE_URL="$base_url" API_KEY="$key" MODEL="$model" AUTH_MODE="$auth_mode" SETTINGS_FILE="$settings_file" node -e '
 const fs = require("fs");
 const file = process.env.SETTINGS_FILE;
 let content = {};
 if (fs.existsSync(file)) {
   try { content = JSON.parse(fs.readFileSync(file, "utf8")); } catch { content = {}; }
 }
-content.env = { ...(content.env || {}), ANTHROPIC_BASE_URL: process.env.BASE_URL, ANTHROPIC_AUTH_TOKEN: process.env.AUTH_TOKEN };
+const env = { ...(content.env || {}), ANTHROPIC_BASE_URL: process.env.BASE_URL, ANTHROPIC_MODEL: process.env.MODEL };
+if (process.env.AUTH_MODE === "api-key") {
+  env.ANTHROPIC_API_KEY = process.env.API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
+} else {
+  env.ANTHROPIC_AUTH_TOKEN = process.env.API_KEY;
+  delete env.ANTHROPIC_API_KEY;
+}
+content.env = env;
 fs.writeFileSync(file, JSON.stringify(content, null, 2) + "\n", "utf8");
 '
 }
@@ -227,11 +236,31 @@ run_claude() {
 
   local base_url="${URUNAI_BASE_URL:-$DEFAULT_BASE_URL}"
   local model="${URUNAI_CLAUDE_MODEL:-$DEFAULT_MODEL_CLAUDE}"
-  export ANTHROPIC_BASE_URL="$base_url"
-  export ANTHROPIC_AUTH_TOKEN="$key"
-  ensure_claude_settings "$base_url" "$key"
+  local auth_mode="${URUNAI_CLAUDE_AUTH_MODE:-bearer}"
+  auth_mode="$(printf '%s' "$auth_mode" | tr '[:upper:]' '[:lower:]')"
 
-  exec claude "$@"
+  export ANTHROPIC_BASE_URL="$base_url"
+  export ANTHROPIC_MODEL="$model"
+  if [ "$auth_mode" = "api-key" ]; then
+    export ANTHROPIC_API_KEY="$key"
+    unset ANTHROPIC_AUTH_TOKEN
+  else
+    export ANTHROPIC_AUTH_TOKEN="$key"
+    unset ANTHROPIC_API_KEY
+  fi
+  ensure_claude_settings "$base_url" "$key" "$model" "$auth_mode"
+
+  local has_model_arg=0
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --model|--model=*) has_model_arg=1 ;;
+    esac
+  done
+  if [ "$has_model_arg" -eq 1 ]; then
+    exec claude "$@"
+  fi
+  exec claude --model "$model" "$@"
 }
 
 run_codex() {
