@@ -6,7 +6,7 @@ set -euo pipefail
 
 APP_NAME="uruncode"
 DEFAULT_BASE_URL="https://api.urunai.my.id/v1"
-DEFAULT_MODEL_CLAUDE="aim-cdx-mini"
+DEFAULT_MODEL_CLAUDE="claude-haiku-4-5-20251001"
 DEFAULT_MODEL_CODEX="gpt-5.4-mini"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/uruncode"
 CONFIG_FILE="$CONFIG_DIR/config"

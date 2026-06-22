@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 
 $AppName = 'uruncode'
 $DefaultBaseUrl = 'https://api.urunai.my.id/v1'
-$DefaultModel_CLAUDE = 'aim-cdx-mini'
+$DefaultModel_CLAUDE = 'claude-haiku-4-5-20251001'
 $DefaultModel_CODEX = 'gpt-5.4-mini'
 $ConfigDir = Join-Path $env:APPDATA 'uruncode'
 $ConfigFile = Join-Path $ConfigDir 'config'
